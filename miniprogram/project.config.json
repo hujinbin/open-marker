@@ -1,6 +1,0 @@
-{
-  "miniprogramRoot": "./",
-  "projectname": "video-link-helper",
-  "description": "纯前端公开视频链接识别工具",
-  "setting": { "es6": true, "minified": true, "urlCheck": false }
-}
