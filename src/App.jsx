@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
-import { api, download } from "./api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api } from "./api";
 import Auth from "./Auth";
 import Editor from "./Editor";
+import ProjectSettings from "./ProjectSettings";
+import ImageUpload from "./ImageUpload";
+import ExportPanel from "./ExportPanel";
+import { AuditPanel, StatsPanel } from "./ActivityPanel";
+import AIJobsPanel from "./AIJobsPanel";
 import "./App.css";
 
 const tabs = {
@@ -11,6 +16,7 @@ const tabs = {
   quality: "审核质检",
   team: "项目成员",
   exports: "数据导出",
+  settings: "项目设置",
 };
 const statuses = {
   todo: "待标注",
@@ -19,26 +25,23 @@ const statuses = {
   approved: "已通过",
   rejected: "已驳回",
 };
-const actions = {
-  import: "导入数据",
-  assign: "分配任务",
-  save: "保存草稿",
-  submit: "提交审核",
-  approve: "审核通过",
-  reject: "驳回返工",
-  member: "更新成员",
-  archive: "归档项目",
-};
 const route = () => {
   const [tab, id] = location.hash.slice(1).split("/");
   return { tab: tabs[tab] ? tab : "overview", id: id || "" };
 };
 export default function App() {
+  const dirty = useRef(false);
+  const lastHash = useRef(location.hash);
+  const canLeave = () => !dirty.current || confirm("当前标注尚未保存，确认放弃修改并离开？");
+  const markDirty = useCallback((value) => { dirty.current = value; }, []);
   const [user, setUser] = useState(null),
     [checking, setChecking] = useState(true);
   const [view, setView] = useState(route),
     [projects, setProjects] = useState([]),
     [project, setProject] = useState(null);
+  const [page, setPage] = useState(1), [total, setTotal] = useState(0), [dataset, setDataset] = useState(""), [assignee, setAssignee] = useState("");
+  const [version, setVersion] = useState(0), [archived, setArchived] = useState(false), [notice, setNotice] = useState("");
+  const [checked, setChecked] = useState([]), [bulkAssignee, setBulkAssignee] = useState(""), [qc, setQc] = useState(false);
   const [busy, setBusy] = useState(false),
     [loading, setLoading] = useState(false),
     [error, setError] = useState("");
@@ -67,18 +70,34 @@ export default function App() {
   }, [login]);
   useEffect(() => {
     const change = () => {
+      if (!canLeave()) {
+        history.replaceState(null, "", lastHash.current || "#overview");
+        return;
+      }
+      dirty.current = false;
+      lastHash.current = location.hash;
       setView(route());
       setSelected("");
       setError("");
       setFilter("");
+      setPage(1);
+      setDataset("");
+      setChecked([]);
     };
     window.addEventListener("hashchange", change);
-    return () => window.removeEventListener("hashchange", change);
+    const unload = (event) => {
+      if (dirty.current) { event.preventDefault(); event.returnValue = ""; }
+    };
+    window.addEventListener("beforeunload", unload);
+    return () => {
+      window.removeEventListener("hashchange", change);
+      window.removeEventListener("beforeunload", unload);
+    };
   }, []);
   const refresh = useCallback(async () => {
-    const r = await api("annotation/projects");
+    const r = await api(`annotation/projects?archived=${archived}`);
     setProjects(r.data);
-  }, []);
+  }, [archived]);
   useEffect(() => {
     if (user) refresh().catch((e) => setError(e.message));
   }, [user, refresh]);
@@ -89,9 +108,9 @@ export default function App() {
     setLoading(false);
     if (!user || !view.id) return;
     setLoading(true);
-    api(`annotation/projects/${view.id}`)
+    api(`annotation/projects/${view.id}?archived=${archived}`)
       .then((r) => {
-        if (active) setProject(r.data);
+        if (active) setProject({ ...r.data, samples: [] });
       })
       .catch((e) => {
         if (active) setError(e.message);
@@ -102,7 +121,18 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [view.id, user]);
+  }, [view.id, user, archived]);
+  useEffect(() => {
+    if (!user || !view.id || project?.storageVersion !== 2 || archived) return;
+    let active = true;
+    const q = new URLSearchParams({ page, status: view.tab === "quality" ? qc ? "approved" : "review" : filter, random: String(view.tab === "quality" && qc), search, dataset, assignee });
+    api(`annotation/projects/${view.id}/samples?${q}`).then(r => {
+      if (!active) return;
+      setTotal(r.data.total);
+      setProject(p => p && p._id === view.id ? { ...p, samples: r.data.items } : p);
+    }).catch(e => { if (active) setError(e.message); });
+    return () => { active = false; };
+  }, [user, view.id, view.tab, project?.storageVersion, page, filter, search, dataset, assignee, version, archived, qc]);
   function go(tab, id = view.id) {
     location.hash = `${tab}${id ? "/" + id : ""}`;
   }
@@ -118,12 +148,33 @@ export default function App() {
     }
   }
   async function update(body) {
-    const r = await api(`annotation/projects/${project._id}`, {
+    const current = project.samples.find(s => s.id === body.sampleId);
+    const path = `annotation/projects/${project._id}${body.sampleId ? `/samples/${body.sampleId}` : ""}`;
+    const r = await api(path, {
       ...body,
-      revision: project.revision,
+      revision: body.revision ?? (current ? current.revision : project.revision),
     });
-    if (route().id === r.data._id) setProject(r.data);
-    await refresh();
+    if (route().id === project._id) {
+      if (body.sampleId) setProject(p => ({ ...p, samples: p.samples.map(s => s.id === r.data.id ? r.data : s) }));
+      else setProject(p => ({ ...r.data, samples: p.samples }));
+    }
+    api(`annotation/projects/${project._id}`).then(r => setProject(p => p?._id === r.data._id ? { ...r.data, samples: p.samples } : p)).catch(() => {});
+    refresh().catch((e) => setError(`保存成功，但列表刷新失败：${e.message}`));
+    return r.data;
+  }
+  function changeFilter(setter, value) {
+    if (!canLeave()) return;
+    dirty.current = false;
+    setSelected("");
+    setter(value);
+    setPage(1);
+    setChecked([]);
+  }
+  function choose(id) {
+    if (id === selected || !canLeave()) return;
+    dirty.current = false;
+    setSelected(id);
+    setFeedback("");
   }
   const owner = project && project.ownerId === user?._id;
   const reviewer =
@@ -144,9 +195,9 @@ export default function App() {
   if (!user) return <Auth onLogin={login} />;
   const counts = project
     ? {
-        total: project.samples.length,
-        approved: project.samples.filter((s) => s.status === "approved").length,
-        pending: project.samples.filter((s) => s.status === "review").length,
+        total: project.total,
+        approved: project.approved,
+        pending: project.pending,
       }
     : projects.reduce(
         (a, p) => ({
@@ -156,12 +207,7 @@ export default function App() {
         }),
         { total: 0, approved: 0, pending: 0 }
       );
-  const visible = (project?.samples || []).filter(
-    (s) =>
-      (view.tab !== "quality" || s.status === "review") &&
-      (!filter || s.status === filter) &&
-      `${s.content} ${s.dataset}`.toLowerCase().includes(search.toLowerCase())
-  );
+  const visible = project?.samples || [];
   return (
     <div className="workspace">
       <aside className="sidebar">
@@ -200,6 +246,8 @@ export default function App() {
           <small>惊觉账号 · 已登录</small>
           <button
             onClick={() => {
+              if (!canLeave()) return;
+              dirty.current = false;
               localStorage.removeItem("token");
               setUser(null);
               setProject(null);
@@ -232,11 +280,15 @@ export default function App() {
             <button
               onClick={() =>
                 run(async () => {
+                  if (!canLeave()) return;
+                  dirty.current = false;
+                  setSelected("");
                   await refresh();
                   if (view.id)
                     setProject(
-                      (await api(`annotation/projects/${view.id}`)).data
+                      { ...(await api(`annotation/projects/${view.id}`)).data, samples: [] }
                     );
+                  setVersion(v => v + 1);
                 })
               }
             >
@@ -244,6 +296,8 @@ export default function App() {
             </button>
           </div>
         )}
+        {notice && <p role="status" className="feedback">{notice}<button onClick={() => setNotice("")}>关闭</button></p>}
+        {project && project.storageVersion !== 2 && <section className="panel"><h2>旧项目需要迁移</h2><p>保留原始样本副本，迁移到可分页、按样本保存的新结构。迁移可安全重试。</p><button disabled={!owner || busy} onClick={() => run(async () => { await update({ action: "migrate" }); setVersion(v => v + 1); })}>迁移数据</button></section>}
         {loading ? (
           <div className="empty">加载项目中…</div>
         ) : (
@@ -273,15 +327,16 @@ export default function App() {
                 <h2>
                   项目空间 <small>{projects.length} 个项目</small>
                 </h2>
+                <label className="check"><input type="checkbox" checked={archived} onChange={e => { setArchived(e.target.checked); go("overview", ""); }} />查看已归档项目</label>
                 <div className="project-grid">
                   {projects.map((p) => (
                     <button
                       className="project-card"
                       key={p._id}
-                      onClick={() => go("tasks", p._id)}
+                      onClick={() => go(archived ? "settings" : "tasks", p._id)}
                     >
                       <span className="eyebrow">
-                        {p.type === "text" ? "文本分类" : "图像目标检测"}
+                        {p.type === "text" ? "文本分类" : p.type === "ner" ? "文本实体标注" : "图像目标检测"}
                       </span>
                       <h3>{p.name}</h3>
                       <p>{p.labels.join(" / ")}</p>
@@ -305,8 +360,9 @@ export default function App() {
             )}
             {project && view.tab === "datasets" && (
               <>
+                {owner && project.type === "image" && <ImageUpload project={project} onComplete={() => { api(`annotation/projects/${project._id}`).then(r => setProject(p => ({ ...r.data, samples: p.samples }))).catch(e => setError(e.message)); setVersion(v => v + 1); refresh(); }} />}
                 <div className="toolbar">
-                  <p>每个项目最多 500 条，支持 TXT / JSONL 导入。</p>
+                  <p>每批最多 500 条，支持 TXT / JSONL 导入、预览与去重。</p>
                   {owner && (
                     <button
                       className="primary"
@@ -317,22 +373,19 @@ export default function App() {
                   )}
                 </div>
                 <div className="project-grid">
-                  {[...new Set(project.samples.map((s) => s.dataset))].map(
-                    (name) => (
-                      <article className="panel" key={name}>
+                  {(project.datasets || []).map(
+                    (d) => (
+                      <article className="panel" key={d._id}>
                         <span className="eyebrow">DATASET</span>
-                        <h2>{name}</h2>
+                        <h2>{d.name}</h2>
                         <p>
-                          {
-                            project.samples.filter((s) => s.dataset === name)
-                              .length
-                          }{" "}
+                          {d.total}{" "}
                           条数据 ·{" "}
-                          {project.type === "text" ? "文本" : "图片地址"}
+                          {project.type !== "image" ? "文本" : "图片"}
                         </p>
                         <button
                           onClick={() => {
-                            setSearch(name);
+                            setSearch(d.name);
                             go("tasks");
                           }}
                         >
@@ -342,7 +395,7 @@ export default function App() {
                     )
                   )}
                 </div>
-                {!project.samples.length && (
+                {!project.datasets?.length && (
                   <div className="empty">数据集为空，请导入待标注内容。</div>
                 )}
               </>
@@ -354,13 +407,13 @@ export default function App() {
                     aria-label="搜索数据"
                     placeholder="搜索内容或数据集"
                     value={search}
-                    onChange={(e) => setSearch(e.target.value)}
+                    onChange={(e) => changeFilter(setSearch, e.target.value)}
                   />
                   {view.tab === "tasks" && (
                     <select
                       aria-label="筛选状态"
                       value={filter}
-                      onChange={(e) => setFilter(e.target.value)}
+                      onChange={(e) => changeFilter(setFilter, e.target.value)}
                     >
                       <option value="">全部状态</option>
                       {Object.entries(statuses).map(([k, v]) => (
@@ -370,17 +423,21 @@ export default function App() {
                       ))}
                     </select>
                   )}
-                  <span>{visible.length} 条任务</span>
+                  <select aria-label="筛选数据集" value={dataset} onChange={e => changeFilter(setDataset, e.target.value)}><option value="">全部数据集</option>{project.datasets?.map(d => <option key={d._id} value={d._id}>{d.name}</option>)}</select>
+                  <select aria-label="筛选标注员" value={assignee} onChange={e => changeFilter(setAssignee, e.target.value)}><option value="">全部人员</option><option value="me">我的任务</option><option value="unassigned">未分配</option></select>
+                  <span>{total} 条任务 · 第 {page} 页</span>
+                  {view.tab === "quality" && reviewer && <button onClick={() => { if (canLeave()) { dirty.current = false; setSelected(""); setQc(!qc); setPage(1); } }}>{qc ? "返回待审核" : "随机抽检已通过数据（20 条）"}</button>}
+                  <button disabled={page <= 1} onClick={() => { if (canLeave()) { dirty.current = false; setSelected(""); setPage(p => p - 1); } }}>上一页</button>
+                  <button disabled={page * 20 >= total} onClick={() => { if (canLeave()) { dirty.current = false; setSelected(""); setPage(p => p + 1); } }}>下一页</button>
                 </div>
+                {owner && <div className="toolbar bulk-toolbar"><label className="check"><input type="checkbox" checked={visible.length > 0 && visible.every(s => checked.includes(s.id))} onChange={e => setChecked(e.target.checked ? visible.map(s => s.id) : [])} />选择本页</label><span>已选 {visible.filter(s => checked.includes(s.id)).length} 条</span><select aria-label="批量分配人员" value={bulkAssignee} onChange={e => setBulkAssignee(e.target.value)}><option value="">回收为未分配</option><option value={project.ownerId}>负责人</option>{project.members.filter(m => m.role === "annotator").map(m => <option key={m.userId} value={m.userId}>{m.name}</option>)}</select><button disabled={busy || !checked.length} onClick={() => { if (!canLeave()) return; run(async () => { const r = await api(`annotation/projects/${project._id}/bulk`, { action: "assign", assignee: bulkAssignee, items: visible.filter(s => checked.includes(s.id)).map(s => ({ id: s.id, revision: s.revision })) }); setNotice(`成功 ${r.data.results.filter(r => r.ok).length} 条；${r.data.results.filter(r => !r.ok).map(r => r.message).join("；") || "无失败项"}`); dirty.current = false; setSelected(""); setChecked([]); setVersion(v => v + 1); }); }}>批量分配 / 回收</button></div>}
                 <div className="task-layout">
                   <div className="task-list">
                     {visible.map((s) => (
-                      <button
-                        key={s.id}
+                      <div className="task-row" key={s.id}>{owner && <input type="checkbox" aria-label={`选择任务 ${s.content.slice(0, 30)}`} checked={checked.includes(s.id)} onChange={e => setChecked(ids => e.target.checked ? [...ids, s.id] : ids.filter(id => id !== s.id))} />}<button
                         className={s.id === selected ? "selected" : ""}
                         onClick={() => {
-                          setSelected(s.id);
-                          setFeedback("");
+                          choose(s.id);
                         }}
                       >
                         <small>{s.dataset}</small>
@@ -388,7 +445,7 @@ export default function App() {
                         <span className={`status ${s.status}`}>
                           {statuses[s.status]}
                         </span>
-                      </button>
+                      </button></div>
                     ))}
                     {!visible.length && (
                       <div className="empty">没有符合条件的任务</div>
@@ -398,9 +455,12 @@ export default function App() {
                     {sample ? (
                       <>
                         <div className="toolbar">
+                          <button disabled={busy || visible.findIndex(s => s.id === selected) <= 0} onClick={() => choose(visible[visible.findIndex(s => s.id === selected) - 1]?.id)}>上一条</button>
+                          <button disabled={busy || visible.findIndex(s => s.id === selected) < 0 || visible.findIndex(s => s.id === selected) >= visible.length - 1} onClick={() => choose(visible[visible.findIndex(s => s.id === selected) + 1]?.id)}>下一条</button>
                           <span className={`status ${sample.status}`}>
                             {statuses[sample.status]}
                           </span>
+                          {!sample.assignee && (owner || project.members.some(m => m.userId === user._id && m.role === "annotator")) && ["todo", "labeling", "rejected"].includes(sample.status) && <button disabled={busy} onClick={() => run(() => update({ action: "claim", sampleId: sample.id }))}>领取任务</button>}
                           {owner &&
                             ["todo", "labeling", "rejected"].includes(
                               sample.status
@@ -436,20 +496,25 @@ export default function App() {
                             )}
                         </div>
                         <Editor
-                          key={`${sample.id}-${project.revision}`}
+                          key={`${project._id}-${sample.id}`}
                           sample={sample}
+                          userId={user._id}
                           project={project}
                           editable={editable}
                           busy={busy}
-                          onSave={(action, annotation) =>
-                            run(() =>
-                              update({
+                          onDirtyChange={markDirty}
+                          onSave={async (action, annotation, dimensions = {}) => {
+                            const next = visible[visible.findIndex(s => s.id === sample.id) + 1];
+                            const result = await update({
                                 action,
                                 annotation,
                                 sampleId: sample.id,
-                              })
-                            )
-                          }
+                                ...dimensions,
+                            });
+                            dirty.current = false;
+                            if (action === "submit" && next) { setSelected(next.id); setFeedback(""); }
+                            return result;
+                          }}
                         />
                         {reviewer && sample.status === "review" && (
                           <div className="review">
@@ -492,12 +557,14 @@ export default function App() {
                             </button>
                           </div>
                         )}
+                        {reviewer && sample.status === "approved" && <div className="review"><label>抽检问题<textarea value={feedback} maxLength={1000} onChange={e => setFeedback(e.target.value)} /></label><button disabled={busy || !feedback.trim()} onClick={() => run(() => update({ action: "reopen", sampleId: sample.id, feedback }))}>抽检不通过，退回返工</button></div>}
                       </>
                     ) : (
                       <div className="empty">选择一条任务开始工作</div>
                     )}
                   </section>
                 </div>
+                {owner && <AIJobsPanel project={project} sampleIds={visible.filter(s => checked.includes(s.id)).map(s => s.id)} onRefresh={() => { if (canLeave()) { dirty.current = false; setSelected(""); setVersion(v => v + 1); } }} />}
               </>
             )}
             {project && view.tab === "team" && (
@@ -512,8 +579,10 @@ export default function App() {
                   <div className="member" key={m.userId}>
                     <b>{m.name}</b>
                     <span>{m.role === "annotator" ? "标注员" : "审核员"}</span>
+                    {owner && <button disabled={busy} onClick={() => { if (confirm(`移除 ${m.name}？如有未完成任务，请先回收。`)) run(() => update({ action: "removeMember", userId: m.userId })); }}>移除成员</button>}
                   </div>
                 ))}
+                <StatsPanel project={project} />
                 {owner && (
                   <form
                     onSubmit={(e) => {
@@ -543,42 +612,11 @@ export default function App() {
                 )}
               </section>
             )}
+            {project && view.tab === "settings" && <ProjectSettings project={project} owner={owner} busy={busy} onSave={b => run(() => update(b))} onRestore={() => run(async () => { await update({ action: "restore" }); setArchived(false); go("overview", ""); })} />}
             {project && view.tab === "exports" && (
               <section className="panel">
-                <span className="eyebrow">READY FOR TRAINING</span>
-                <h2>交付已审核的数据</h2>
-                <p>
-                  当前可导出 {counts.approved} 条。JSONL
-                  包含原始内容、标签和标注结果。图片框使用 0–1 归一化坐标。
-                </p>
-                <button
-                  className="primary"
-                  disabled={!owner || busy || !counts.approved}
-                  onClick={() =>
-                    run(async () =>
-                      download(
-                        (await api(`annotation/projects/${project._id}/export`))
-                          .data,
-                        project.name
-                      )
-                    )
-                  }
-                >
-                  导出 JSONL ↓
-                </button>
-                {!owner && <p>仅项目负责人可以导出。</p>}
-                <h3>最近操作</h3>
-                {project.events
-                  .slice(-15)
-                  .reverse()
-                  .map((e, i) => (
-                    <div className="member" key={i}>
-                      <span>
-                        {actions[e.action]} · {e.userId}
-                      </span>
-                      <small>{new Date(e.time).toLocaleString()}</small>
-                    </div>
-                  ))}
+                <ExportPanel project={project} owner={owner} />
+                <AuditPanel project={project} />
                 {owner && (
                   <button
                     className="danger"
@@ -641,8 +679,7 @@ export default function App() {
                       await refresh();
                       go("datasets", r.data._id);
                     } else {
-                      await update({
-                        action: "import",
+                      const payload = {
                         dataset: fields.dataset,
                         items: fields.content
                           .split("\n")
@@ -658,7 +695,15 @@ export default function App() {
                             }
                             return line;
                           }),
-                      });
+                      };
+                      const preview = (await api(`annotation/projects/${project._id}/import`, { ...payload, preview: true })).data;
+                      const invalid = preview.results.filter(r => r.status !== "ready");
+                      if (!confirm(`可导入 ${preview.ready} 条；跳过 ${invalid.length} 条。${invalid.slice(0, 5).map(r => `\n第 ${r.row} 行：${r.reason || "重复数据"}`).join("")}\n确认导入？`)) return;
+                      const imported = (await api(`annotation/projects/${project._id}/import`, payload)).data;
+                      setProject(p => ({ ...imported.project, samples: p.samples }));
+                      setNotice(`成功导入 ${imported.inserted} 条；重复或无效行已跳过。`);
+                      setVersion(v => v + 1);
+                      await refresh();
                     }
                     setModal("");
                   });
@@ -675,6 +720,7 @@ export default function App() {
                       <select name="type">
                         <option value="text">文本 · 多标签分类</option>
                         <option value="image">图像 · 矩形框检测</option>
+                        <option value="ner">文本 · 实体标注（NER）</option>
                       </select>
                     </label>
                     <label>
@@ -723,12 +769,12 @@ export default function App() {
                       />
                     </label>
                     <label>
-                      {project.type === "text"
+                      {project.type !== "image"
                         ? "文本内容"
                         : "图片 HTTP(S) 地址"}
                       <textarea name="content" required rows={8} />
                     </label>
-                    <p>本次导入与现有数据合计不能超过 500 条。</p>
+                    <p>每批最多 500 条。提交前显示预览，同一数据集内自动去重。</p>
                   </>
                 )}
                 <button className="primary" disabled={busy}>

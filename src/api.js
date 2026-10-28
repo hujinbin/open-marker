@@ -22,8 +22,13 @@ export async function api(path, body) {
     throw new Error("接口返回异常，请确认后端地址和服务状态");
   }
   if (!response.ok || result.code !== 200)
-    throw new Error(result.msg || "请求失败");
+    throw Object.assign(new Error(result.msg || "请求失败"), { status: response.status });
   return result;
+}
+export async function assetUrl(projectId, assetId) {
+  const r = await fetch(`${import.meta.env.VITE_API_BASE || ""}/api/annotation/projects/${projectId}/assets/${assetId}`, { headers: { token: localStorage.getItem("token") || "" }, signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error("图片读取失败，请检查登录状态和资源权限");
+  return URL.createObjectURL(await r.blob());
 }
 export function download(rows, name) {
   const url = URL.createObjectURL(
