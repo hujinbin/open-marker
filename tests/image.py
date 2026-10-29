@@ -15,7 +15,9 @@ with sync_playwright() as p:
     browser = p.chromium.launch(channel="msedge", headless=True)
     page = browser.new_page(viewport={"width": 1600, "height": 1100})
     errors = []
+    saves = []
     page.on("pageerror", lambda e: errors.append(str(e)))
+    page.on("request", lambda request: saves.append(request.url) if request.method == "POST" and "/samples/" in request.url and request.post_data_json.get("action") == "save" else None)
     page.goto("http://127.0.0.1:5189")
     page.wait_for_load_state("networkidle")
     page.get_by_label("手机号").fill("13900001234")
@@ -43,6 +45,10 @@ with sync_playwright() as p:
     page.mouse.up()
     expect(page.locator(".box-item")).to_have_count(1)
     expect(page.get_by_role("status")).to_have_text("已保存", timeout=10000)
+    # 覆盖服务端调整框字段顺序后的脏状态回归：不能不断重复自动保存。
+    page.wait_for_timeout(3500)
+    expect(page.get_by_role("status")).to_have_text("已保存")
+    assert len(saves) == 1, f"自动保存重复触发：{len(saves)} 次"
     page.get_by_role("button", name="选择 / 移动", exact=True).click()
     drawn = page.locator(".image-stage .box").bounding_box()
     page.mouse.move(drawn["x"]+drawn["width"]*.5, drawn["y"]+drawn["height"]*.5)

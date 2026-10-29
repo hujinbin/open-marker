@@ -12,6 +12,7 @@ dist
 dist-ssr
 test-results/
 __pycache__/
+.venv/
 *.local
 
 # Editor directories and files

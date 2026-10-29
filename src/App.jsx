@@ -18,6 +18,7 @@ const tabs = {
   exports: "数据导出",
   settings: "项目设置",
 };
+const localDemo = import.meta.env.DEV && import.meta.env.VITE_DEMO_LOGIN === "true";
 const statuses = {
   todo: "待标注",
   labeling: "标注中",
@@ -214,7 +215,7 @@ export default function App() {
         <a href="#overview" className="brand">
           ✳ OPEN MARKER
         </a>
-        <p className="sidebar-caption">数据标注工作区</p>
+        <p className="sidebar-caption">{localDemo ? "本地演示 · 数据与业务环境隔离" : "数据标注工作区"}</p>
         <label>
           当前项目
           <select
@@ -243,7 +244,7 @@ export default function App() {
         </nav>
         <div className="account">
           <b>{user.nickname}</b>
-          <small>惊觉账号 · 已登录</small>
+          <small>{localDemo ? "本地体验账号 · 已登录" : "惊觉账号 · 已登录"}</small>
           <button
             onClick={() => {
               if (!canLeave()) return;

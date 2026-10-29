@@ -5,6 +5,19 @@
   font-synthesis: none;
   line-height: 1.6;
 }
+.demo-entry {
+  padding: 18px;
+  margin: 16px 0 22px;
+  border: 1px solid #c5d7c2;
+  border-left: 4px solid #24634e;
+  border-radius: 8px;
+  background: #f1f6ec;
+}
+.demo-entry p { font-size: 13px; margin-bottom: 10px; }
+.demo-entry small { display: block; margin-top: 10px; }
+.demo-entry label { margin-bottom: 8px; }
+.demo-entry .primary { width: 100%; }
+.demo-credentials code { user-select: all; font-weight: 600; }
 * {
   box-sizing: border-box;
 }

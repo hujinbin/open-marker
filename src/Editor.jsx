@@ -28,7 +28,10 @@ export default function Editor({ sample, project, editable, busy: externalBusy, 
       const result = await onSave(action, value, { ...dimensions, revision: baseRevision.current });
       baseRevision.current = result.revision;
       const persisted = result.annotation || value;
-      if (action === "adoptPrediction") setHistory({ past: [], value: persisted, future: [] });
+      // 服务端会规范化字段顺序和标注内容，成功后同步当前值，避免误判脏状态并反复自动保存。
+      setHistory(h => action === "adoptPrediction"
+        ? { past: [], value: persisted, future: [] }
+        : h.value === value ? { ...h, value: persisted } : h);
       setSaved(JSON.stringify(persisted));
       try { sessionStorage.removeItem(key); } catch { /* 不影响已确认的服务端保存结果。 */ }
       setRecovery(null);
