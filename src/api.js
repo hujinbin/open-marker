@@ -1,6 +1,7 @@
 export async function api(path, body) {
-  const response = await fetch(
-    `${import.meta.env.VITE_API_BASE || ""}/api/${path}`,
+  let response;
+  try { response = await fetch(
+    `${import.meta.env?.VITE_API_BASE || ""}/api/${path}`,
     {
       method: body === undefined ? "GET" : "POST",
       headers: {
@@ -10,7 +11,9 @@ export async function api(path, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(20000),
     }
-  );
+  ); } catch (error) {
+    throw new Error(error.name === "TimeoutError" ? "请求超时，请稍后重试" : "暂时无法连接服务，请检查网络后重试");
+  }
   if (response.status === 401) {
     localStorage.removeItem("token");
     window.dispatchEvent(new Event("auth-expired"));
@@ -19,10 +22,14 @@ export async function api(path, body) {
   try {
     result = await response.json();
   } catch {
-    throw new Error("接口返回异常，请确认后端地址和服务状态");
+    throw new Error("服务返回异常，请稍后重试");
   }
-  if (!response.ok || result.code !== 200)
-    throw Object.assign(new Error(result.msg || "请求失败"), { status: response.status });
+  if (!result || typeof result !== "object" || Array.isArray(result))
+    throw new Error("服务返回异常，请稍后重试");
+  if (!response.ok || result.code !== 200) {
+    const message = response.status >= 500 ? "服务暂时不可用，请稍后重试" : typeof result.msg === "string" ? result.msg : "请求失败，请稍后重试";
+    throw Object.assign(new Error(message), { status: response.status });
+  }
   return result;
 }
 export async function assetUrl(projectId, assetId) {

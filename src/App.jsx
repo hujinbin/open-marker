@@ -7,6 +7,8 @@ import ImageUpload from "./ImageUpload";
 import ExportPanel from "./ExportPanel";
 import { AuditPanel, StatsPanel } from "./ActivityPanel";
 import AIJobsPanel from "./AIJobsPanel";
+import ErrorBoundary from "./ErrorBoundary";
+import { readProject, readProjects, readSample, readSamplePage } from "./annotationData";
 import "./App.css";
 
 const tabs = {
@@ -40,8 +42,10 @@ export default function App() {
   const [view, setView] = useState(route),
     [projects, setProjects] = useState([]),
     [project, setProject] = useState(null);
+  const [projectsReady, setProjectsReady] = useState(false);
   const [page, setPage] = useState(1), [total, setTotal] = useState(0), [dataset, setDataset] = useState(""), [assignee, setAssignee] = useState("");
   const [version, setVersion] = useState(0), [archived, setArchived] = useState(false), [notice, setNotice] = useState("");
+  const [sampleState, setSampleState] = useState("loading"), [sampleError, setSampleError] = useState("");
   const [checked, setChecked] = useState([]), [bulkAssignee, setBulkAssignee] = useState(""), [qc, setQc] = useState(false);
   const [busy, setBusy] = useState(false),
     [loading, setLoading] = useState(false),
@@ -96,8 +100,10 @@ export default function App() {
     };
   }, []);
   const refresh = useCallback(async () => {
+    setProjectsReady(false);
     const r = await api(`annotation/projects?archived=${archived}`);
-    setProjects(r.data);
+    setProjects(readProjects(r.data));
+    setProjectsReady(true);
   }, [archived]);
   useEffect(() => {
     if (user) refresh().catch((e) => setError(e.message));
@@ -107,11 +113,14 @@ export default function App() {
     setProject(null);
     setSelected("");
     setLoading(false);
+    setSampleState("loading");
+    setSampleError("");
+    setTotal(0);
     if (!user || !view.id) return;
     setLoading(true);
     api(`annotation/projects/${view.id}?archived=${archived}`)
       .then((r) => {
-        if (active) setProject({ ...r.data, samples: [] });
+        if (active) setProject(readProject(r.data));
       })
       .catch((e) => {
         if (active) setError(e.message);
@@ -124,16 +133,20 @@ export default function App() {
     };
   }, [view.id, user, archived]);
   useEffect(() => {
-    if (!user || !view.id || project?.storageVersion !== 2 || archived) return;
+    if (!user || !view.id || project?._id !== view.id || project.storageVersion !== 2 || archived) return;
     let active = true;
+    setSampleState("loading");
+    setSampleError("");
     const q = new URLSearchParams({ page, status: view.tab === "quality" ? qc ? "approved" : "review" : filter, random: String(view.tab === "quality" && qc), search, dataset, assignee });
     api(`annotation/projects/${view.id}/samples?${q}`).then(r => {
       if (!active) return;
-      setTotal(r.data.total);
-      setProject(p => p && p._id === view.id ? { ...p, samples: r.data.items } : p);
-    }).catch(e => { if (active) setError(e.message); });
+      const data = readSamplePage(r.data, project.type);
+      setTotal(data.total);
+      setProject(p => p && p._id === view.id ? { ...p, samples: data.items } : p);
+      setSampleState("ready");
+    }).catch(e => { if (active) { setSampleState("error"); setSampleError(e.message); } });
     return () => { active = false; };
-  }, [user, view.id, view.tab, project?.storageVersion, page, filter, search, dataset, assignee, version, archived, qc]);
+  }, [user, view.id, view.tab, project?._id, project?.type, project?.storageVersion, page, filter, search, dataset, assignee, version, archived, qc]);
   function go(tab, id = view.id) {
     location.hash = `${tab}${id ? "/" + id : ""}`;
   }
@@ -155,13 +168,14 @@ export default function App() {
       ...body,
       revision: body.revision ?? (current ? current.revision : project.revision),
     });
+    const data = body.sampleId ? readSample(r.data, project.type) : readProject(r.data);
     if (route().id === project._id) {
-      if (body.sampleId) setProject(p => ({ ...p, samples: p.samples.map(s => s.id === r.data.id ? r.data : s) }));
-      else setProject(p => ({ ...r.data, samples: p.samples }));
+      if (body.sampleId) setProject(p => p?._id === project._id ? { ...p, samples: p.samples.map(s => s.id === data.id ? data : s) } : p);
+      else setProject(p => p?._id === project._id ? { ...data, samples: p.samples } : p);
     }
-    api(`annotation/projects/${project._id}`).then(r => setProject(p => p?._id === r.data._id ? { ...r.data, samples: p.samples } : p)).catch(() => {});
+    api(`annotation/projects/${project._id}`).then(r => { const detail = readProject(r.data); setProject(p => p?._id === detail._id ? { ...detail, samples: p.samples } : p); }).catch(e => setError(`保存成功，但项目刷新失败：${e.message}`));
     refresh().catch((e) => setError(`保存成功，但列表刷新失败：${e.message}`));
-    return r.data;
+    return data;
   }
   function changeFilter(setter, value) {
     if (!canLeave()) return;
@@ -208,7 +222,7 @@ export default function App() {
         }),
         { total: 0, approved: 0, pending: 0 }
       );
-  const visible = project?.samples || [];
+  const visible = sampleState === "ready" ? project?.samples || [] : [];
   return (
     <div className="workspace">
       <aside className="sidebar">
@@ -287,7 +301,7 @@ export default function App() {
                   await refresh();
                   if (view.id)
                     setProject(
-                      { ...(await api(`annotation/projects/${view.id}`)).data, samples: [] }
+                      readProject((await api(`annotation/projects/${view.id}`)).data)
                     );
                   setVersion(v => v + 1);
                 })
@@ -302,7 +316,7 @@ export default function App() {
         {loading ? (
           <div className="empty">加载项目中…</div>
         ) : (
-          <>
+          <ErrorBoundary resetKey={`${view.tab}/${view.id}/${version}`}>
             {view.tab === "overview" && (
               <>
                 <section className="hero">
@@ -314,10 +328,10 @@ export default function App() {
                 </section>
                 <section className="metrics">
                   {[
-                    ["项目数量", projects.length],
-                    ["数据总量", counts.total],
-                    ["待审核", counts.pending],
-                    ["已通过", counts.approved],
+                    ["项目数量", projectsReady ? projects.length : "—"],
+                    ["数据总量", project || projectsReady ? counts.total : "—"],
+                    ["待审核", project || projectsReady ? counts.pending : "—"],
+                    ["已通过", project || projectsReady ? counts.approved : "—"],
                   ].map(([k, n]) => (
                     <article key={k}>
                       <span>{k}</span>
@@ -326,7 +340,7 @@ export default function App() {
                   ))}
                 </section>
                 <h2>
-                  项目空间 <small>{projects.length} 个项目</small>
+                  项目空间 <small>{projectsReady ? `${projects.length} 个项目` : "项目数量暂不可用"}</small>
                 </h2>
                 <label className="check"><input type="checkbox" checked={archived} onChange={e => { setArchived(e.target.checked); go("overview", ""); }} />查看已归档项目</label>
                 <div className="project-grid">
@@ -349,19 +363,20 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                {!projects.length && (
+                {!projectsReady && !error && <div className="empty">正在加载项目…</div>}
+                {projectsReady && !projects.length && !error && (
                   <div className="empty">
                     还没有项目。创建第一个项目，设置标签并导入数据。
                   </div>
                 )}
               </>
             )}
-            {view.tab !== "overview" && !project && (
+            {view.tab !== "overview" && !project && !error && (
               <div className="empty">请从左侧选择项目，或先创建一个项目。</div>
             )}
             {project && view.tab === "datasets" && (
               <>
-                {owner && project.type === "image" && <ImageUpload project={project} onComplete={() => { api(`annotation/projects/${project._id}`).then(r => setProject(p => ({ ...r.data, samples: p.samples }))).catch(e => setError(e.message)); setVersion(v => v + 1); refresh(); }} />}
+                {owner && project.type === "image" && <ImageUpload project={project} onComplete={() => { api(`annotation/projects/${project._id}`).then(r => { const detail = readProject(r.data); setProject(p => p?._id === detail._id ? { ...detail, samples: p.samples } : p); }).catch(e => setError(e.message)); setVersion(v => v + 1); refresh().catch(e => setError(e.message)); }} />}
                 <div className="toolbar">
                   <p>每批最多 500 条，支持 TXT / JSONL 导入、预览与去重。</p>
                   {owner && (
@@ -401,7 +416,13 @@ export default function App() {
                 )}
               </>
             )}
-            {project && ["tasks", "quality"].includes(view.tab) && (
+            {project?.storageVersion === 2 && !archived && ["tasks", "quality"].includes(view.tab) && sampleState !== "ready" && (
+              <section className="panel recovery-panel" role={sampleState === "error" ? "alert" : "status"}>
+                <h2>{sampleState === "error" ? "任务加载失败" : "正在加载任务…"}</h2>
+                {sampleState === "error" && <><p>{sampleError}</p><button className="primary" onClick={() => setVersion(v => v + 1)}>重试加载任务</button></>}
+              </section>
+            )}
+            {project?.storageVersion === 2 && !archived && ["tasks", "quality"].includes(view.tab) && (
               <>
                 <div className="toolbar">
                   <input
@@ -426,13 +447,25 @@ export default function App() {
                   )}
                   <select aria-label="筛选数据集" value={dataset} onChange={e => changeFilter(setDataset, e.target.value)}><option value="">全部数据集</option>{project.datasets?.map(d => <option key={d._id} value={d._id}>{d.name}</option>)}</select>
                   <select aria-label="筛选标注员" value={assignee} onChange={e => changeFilter(setAssignee, e.target.value)}><option value="">全部人员</option><option value="me">我的任务</option><option value="unassigned">未分配</option></select>
-                  <span>{total} 条任务 · 第 {page} 页</span>
+                  <span>{sampleState === "ready" ? `${total} 条任务 · 第 ${page} 页` : "任务数量暂不可用"}</span>
                   {view.tab === "quality" && reviewer && <button onClick={() => { if (canLeave()) { dirty.current = false; setSelected(""); setQc(!qc); setPage(1); } }}>{qc ? "返回待审核" : "随机抽检已通过数据（20 条）"}</button>}
-                  <button disabled={page <= 1} onClick={() => { if (canLeave()) { dirty.current = false; setSelected(""); setPage(p => p - 1); } }}>上一页</button>
-                  <button disabled={page * 20 >= total} onClick={() => { if (canLeave()) { dirty.current = false; setSelected(""); setPage(p => p + 1); } }}>下一页</button>
+                  <button disabled={sampleState !== "ready" || page <= 1} onClick={() => { if (canLeave()) { dirty.current = false; setSelected(""); setPage(p => p - 1); } }}>上一页</button>
+                  <button disabled={sampleState !== "ready" || page * 20 >= total} onClick={() => { if (canLeave()) { dirty.current = false; setSelected(""); setPage(p => p + 1); } }}>下一页</button>
                 </div>
-                {owner && <div className="toolbar bulk-toolbar"><label className="check"><input type="checkbox" checked={visible.length > 0 && visible.every(s => checked.includes(s.id))} onChange={e => setChecked(e.target.checked ? visible.map(s => s.id) : [])} />选择本页</label><span>已选 {visible.filter(s => checked.includes(s.id)).length} 条</span><select aria-label="批量分配人员" value={bulkAssignee} onChange={e => setBulkAssignee(e.target.value)}><option value="">回收为未分配</option><option value={project.ownerId}>负责人</option>{project.members.filter(m => m.role === "annotator").map(m => <option key={m.userId} value={m.userId}>{m.name}</option>)}</select><button disabled={busy || !checked.length} onClick={() => { if (!canLeave()) return; run(async () => { const r = await api(`annotation/projects/${project._id}/bulk`, { action: "assign", assignee: bulkAssignee, items: visible.filter(s => checked.includes(s.id)).map(s => ({ id: s.id, revision: s.revision })) }); setNotice(`成功 ${r.data.results.filter(r => r.ok).length} 条；${r.data.results.filter(r => !r.ok).map(r => r.message).join("；") || "无失败项"}`); dirty.current = false; setSelected(""); setChecked([]); setVersion(v => v + 1); }); }}>批量分配 / 回收</button></div>}
-                <div className="task-layout">
+                {owner && <div className="toolbar bulk-toolbar">
+                  <label className="check"><input type="checkbox" disabled={sampleState !== "ready"} checked={visible.length > 0 && visible.every(s => checked.includes(s.id))} onChange={e => setChecked(e.target.checked ? visible.map(s => s.id) : [])} />选择本页</label>
+                  <span>已选 {visible.filter(s => checked.includes(s.id)).length} 条</span>
+                  <select aria-label="批量分配人员" value={bulkAssignee} onChange={e => setBulkAssignee(e.target.value)}><option value="">回收为未分配</option><option value={project.ownerId}>负责人</option>{project.members.filter(m => m.role === "annotator").map(m => <option key={m.userId} value={m.userId}>{m.name}</option>)}</select>
+                  <button disabled={busy || !visible.some(s => checked.includes(s.id))} onClick={() => {
+                    if (!canLeave()) return;
+                    run(async () => {
+                      const r = await api(`annotation/projects/${project._id}/bulk`, { action: "assign", assignee: bulkAssignee, items: visible.filter(s => checked.includes(s.id)).map(s => ({ id: s.id, revision: s.revision })) });
+                      setNotice(`成功 ${r.data.results.filter(r => r.ok).length} 条；${r.data.results.filter(r => !r.ok).map(r => r.message).join("；") || "无失败项"}`);
+                      dirty.current = false; setSelected(""); setChecked([]); setVersion(v => v + 1);
+                    });
+                  }}>批量分配 / 回收</button>
+                </div>}
+                {sampleState === "ready" && <div className="task-layout">
                   <div className="task-list">
                     {visible.map((s) => (
                       <div className="task-row" key={s.id}>{owner && <input type="checkbox" aria-label={`选择任务 ${s.content.slice(0, 30)}`} checked={checked.includes(s.id)} onChange={e => setChecked(ids => e.target.checked ? [...ids, s.id] : ids.filter(id => id !== s.id))} />}<button
@@ -449,7 +482,12 @@ export default function App() {
                       </button></div>
                     ))}
                     {!visible.length && (
-                      <div className="empty">没有符合条件的任务</div>
+                      <div className="empty">
+                        <h3>{project.total === 0 ? "项目还没有数据" : "没有符合条件的任务"}</h3>
+                        <p>{project.total === 0 ? "先导入待标注内容，再开始标注与审核。" : "可以调整筛选条件，或切换到标注任务查看数据。"}</p>
+                        {project.total === 0 && owner && <button className="primary" onClick={() => go("datasets")}>前往导入数据</button>}
+                        {project.total === 0 && !owner && <p>请联系项目负责人导入数据。</p>}
+                      </div>
                     )}
                   </div>
                   <section className="panel task-detail">
@@ -564,7 +602,7 @@ export default function App() {
                       <div className="empty">选择一条任务开始工作</div>
                     )}
                   </section>
-                </div>
+                </div>}
                 {owner && <AIJobsPanel project={project} sampleIds={visible.filter(s => checked.includes(s.id)).map(s => s.id)} onRefresh={() => { if (canLeave()) { dirty.current = false; setSelected(""); setVersion(v => v + 1); } }} />}
               </>
             )}
@@ -639,7 +677,7 @@ export default function App() {
                 )}
               </section>
             )}
-          </>
+          </ErrorBoundary>
         )}
         {modal && (
           <div className="modal-mask">
@@ -701,7 +739,8 @@ export default function App() {
                       const invalid = preview.results.filter(r => r.status !== "ready");
                       if (!confirm(`可导入 ${preview.ready} 条；跳过 ${invalid.length} 条。${invalid.slice(0, 5).map(r => `\n第 ${r.row} 行：${r.reason || "重复数据"}`).join("")}\n确认导入？`)) return;
                       const imported = (await api(`annotation/projects/${project._id}/import`, payload)).data;
-                      setProject(p => ({ ...imported.project, samples: p.samples }));
+                      const detail = readProject(imported.project);
+                      setProject(p => p?._id === detail._id ? { ...detail, samples: p.samples } : p);
                       setNotice(`成功导入 ${imported.inserted} 条；重复或无效行已跳过。`);
                       setVersion(v => v + 1);
                       await refresh();

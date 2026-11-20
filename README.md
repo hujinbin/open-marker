@@ -1,6 +1,6 @@
 # Open Marker
 
-数据标注平台，基于 Vite + React 标准脚手架。前端在本仓库，后端在 `E:\gitee\jue`。
+数据标注平台，基于 Vite + React 标准脚手架。本仓库仅包含前端，通过 API 连接独立后端服务。
 
 ## 启动
 
@@ -12,14 +12,14 @@
 
 ```powershell
 # 后端终端
-cd E:\gitee\jue
+cd <backend-dir>
 npm ci --legacy-peer-deps
 npm run annotation:demo
 ```
 
 ```powershell
 # 前端终端
-cd E:\github\open-marker
+cd <frontend-dir>
 npm ci
 npm run demo
 ```
@@ -30,7 +30,21 @@ npm run demo
 
 ### 连接普通后端
 
-复制 `.env.example` 为 `.env.local`，设置 `API_PROXY_TARGET` 为本地 jue 后端地址（默认 `http://127.0.0.1:3000`）。后端按原项目方式启动，并保证 MongoDB 可用。生产部署时将 `/api` 反向代理到 jue，或构建前设置 `VITE_API_BASE`。路由使用 hash，刷新不需要额外的 history fallback 配置。
+复制 `.env.example` 为 `.env.local`，设置 `API_PROXY_TARGET` 为本地后端地址（默认 `http://127.0.0.1:3000`）。后端按自身启动说明运行，并保证 MongoDB 可用。生产部署时将 `/api` 反向代理到后端服务，或构建前设置 `VITE_API_BASE`。路由使用 hash，刷新不需要额外的 history fallback 配置。
+
+### 本地预览生产构建
+
+先启动上面的隔离演示后端，再在前端仓库执行：
+
+```powershell
+npm run build
+$env:API_PROXY_TARGET = 'http://127.0.0.1:3110'
+npm run preview -- --host 127.0.0.1 --port 5190 --strictPort
+```
+
+打开 `http://127.0.0.1:5190`，使用上述本地体验账号手动登录。该入口运行真实构建产物，没有一键体验按钮；5175 是开发演示入口。两者只连接隔离数据库。Vite preview 仅供本机验收，不是公网生产服务器。
+
+前后端必须配套更新：v2 项目详情不带样本数组，任务由独立分页接口加载。不要只更新后端、继续使用旧前端静态文件。公网更新还需替换前端构建产物并核查缓存，本文的本地验收不代表已发布到公网。
 
 ## 使用流程
 
@@ -58,17 +72,33 @@ npm run demo
 
 ## 验证
 
-前端执行 `npm run build` 和 `npm run lint`。
+前端执行 `npm test`、`npm run build` 和 `npm run lint`。单测覆盖项目/样本响应结构、空数据与异常数据区别，以及网络和非 JSON 错误提示。
 
-后端在 jue 执行 `npm run test:annotation`，覆盖领域、导出格式和 HTTP 集成测试。后者强制使用本机 MongoDB 的临时 `annotation_test_*` 数据库，结束后仅清理自己的临时库和资源目录，不连接业务数据库。演示服务启动后可执行 `node scripts/test-annotation-demo.cjs` 验证账号、隔离和幂等初始化。
+后端执行 `npm run test:annotation`，覆盖领域、导出格式和 HTTP 集成测试。后者强制使用本机 MongoDB 的临时 `annotation_test_*` 数据库，结束后仅清理自己的临时库和资源目录，不连接业务数据库。演示服务启动后可执行 `node scripts/test-annotation-demo.cjs` 验证账号、隔离和幂等初始化。
 
-浏览器验收需要 Python 3.10+、Microsoft Edge 和 `tests/requirements.txt`。建议用独立环境：`python -m venv .venv`，然后 `.\.venv\Scripts\python.exe -m pip install -r tests/requirements.txt`。
+浏览器验收也使用 Node.js（Playwright Test），无需安装 Python、pip 或虚拟环境。首次检出或依赖更新后在前端运行 `npm ci`。Windows 默认使用本机 Microsoft Edge；如使用 Playwright 自带 Chromium，先运行 `npx playwright install chromium`，Windows 下再设置 `$env:MARKER_E2E_BROWSER='chromium'`。单独运行 `npm test` 不需要浏览器或后端。
 
-1. 后端执行 `node scripts/test-annotation-api.cjs --serve`，完成 API 测试后在本机 3109 等待浏览器验收。
-2. 前端另开终端执行 `$env:API_PROXY_TARGET='http://127.0.0.1:3109'; npm run dev -- --host 127.0.0.1 --port 5189 --strictPort`。
-3. 前端执行 `.\.venv\Scripts\python.exe -X utf8 tests/run.py`，只需要临时测试服务 3109/5189。若同时启动了持久演示服务 3110/5175，可执行 `.\.venv\Scripts\python.exe -X utf8 tests/run.py --demo`，这是在完整临时套件前追加演示登录/只读展示测试，不是替代基础套件。截图写入忽略的 `test-results/`。
-4. 验收结束调用 `Invoke-RestMethod -Method Post http://127.0.0.1:3109/api/test/shutdown`，让临时服务清理自己的数据库；再关闭 5189 的 Vite。此关闭接口仅存在于临时测试脚本。
+1. 启动本机 MongoDB，在**后端终端**运行 `node scripts/test-annotation-api.cjs --serve`，等到提示 3109 已就绪。
+2. 在**前端终端**运行 `npm run test:e2e`。它会自动启动开发页面（5189）、构建并启动生产预览（5191）；请留出这两个端口，不需要手动运行 Vite。两者均通过前端代理校验临时服务身份后才开始写入，不使用普通业务后端。
+3. 验收后在 PowerShell 运行 `Invoke-RestMethod -Method Post http://127.0.0.1:3109/api/test/shutdown`，让后端清理本次临时库与资源目录。测试启动的 Vite 服务会自动退出。
 
-生产隔离验收：构建后另开终端执行 `npm run preview -- --host 127.0.0.1 --port 5190 --strictPort`，再执行 `.\.venv\Scripts\python.exe -X utf8 tests/production.py`；验证无体验入口/密码/接口探测，完成后关闭预览进程。自动化账号只在专用演示库或临时测试库有效，不能在普通业务后端使用。
+默认覆盖文本分类与实体识别、图片标注与 COCO ZIP、协作、AI 接口适配和错误恢复。在开发页面和生产预览分别实跑「空项目 → 导入 → 标注 → 审核 → 导出」，校验 JSONL 内容与重复下载的一致性。开发页面还验证组件异常恢复；生产预览额外检查构建包不含体验密码、入口或接口探测。截图、下载物与失败上下文在 `test-results/playwright-run/`；生产验收构建在 `test-results/e2e-dist/`，不覆盖日常的 `dist/`。
 
-产品规格、API、验收清单和部署边界位于后端仓库的 `docs/data-annotation-platform/`，分别见 `product-features.md`、`api.md`、`implementation-checklist.md`、`operations.md`。
+常用命令：
+
+```powershell
+npm run test:e2e -- --list                # 只列出用例，不启动服务
+npm run test:e2e -- --project=production  # 只运行生产构建验收，仍需临时后端 3109
+```
+
+如需**追加演示账号验收**，保持临时后端运行，另开后端终端执行 `npm run annotation:demo`（3110），再在前端执行：
+
+```powershell
+$env:MARKER_E2E_DEMO = '1'
+npm run test:e2e
+Remove-Item Env:MARKER_E2E_DEMO
+```
+
+追加用例自动启动专用演示前端（5188），验证三种角色登录和示例图片，只读取演示项目；完成后可在演示后端终端按 Ctrl+C。
+
+遇到任务加载异常时，页面会显示重试入口，不把损坏数据当成“0 条任务”；组件渲染失败显示恢复页。此保护不能替代配套部署，也不表示自动修复服务端数据。
